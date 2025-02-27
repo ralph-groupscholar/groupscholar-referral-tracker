@@ -31,6 +31,12 @@ pub fn main() !void {
     } else if (std.mem.eql(u8, cmd, "summary")) {
         try summary(allocator, args[2..]);
         return;
+    } else if (std.mem.eql(u8, cmd, "partner-health")) {
+        try partnerHealth(allocator, args[2..]);
+        return;
+    } else if (std.mem.eql(u8, cmd, "partner-alerts")) {
+        try partnerAlerts(allocator, args[2..]);
+        return;
     }
 
     std.debug.print("Unknown command: {s}\n", .{cmd});
@@ -40,17 +46,19 @@ pub fn main() !void {
 fn printHelp() !void {
     const out = std.io.getStdOut().writer();
     try out.writeAll(
-        \"Group Scholar Referral Tracker\n\n\" ++
-        \"Usage:\n\" ++
-        \"  gs-referral-tracker help\n\" ++
-        \"  gs-referral-tracker init-db\n\" ++
-        \"  gs-referral-tracker add-referral --partner <name> --scholar <name> --channel <channel> --date <YYYY-MM-DD> [--sector <sector>] [--region <region>] [--status <status>] [--notes <text>]\n\" ++
-        \"  gs-referral-tracker list-referrals [--limit <n>]\n\" ++
-        \"  gs-referral-tracker summary [--since <YYYY-MM-DD>]\n\n\" ++
-        \"Environment:\n\" ++
-        \"  DATABASE_URL must be set to the production Postgres connection string.\n\" ++
-        \"Notes:\n\" ++
-        \"  Commands shell out to psql, so ensure psql is available.\n\"
+        "Group Scholar Referral Tracker\n\n" ++
+        "Usage:\n" ++
+        "  gs-referral-tracker help\n" ++
+        "  gs-referral-tracker init-db\n" ++
+        "  gs-referral-tracker add-referral --partner <name> --scholar <name> --channel <channel> --date <YYYY-MM-DD> [--sector <sector>] [--region <region>] [--status <status>] [--notes <text>]\n" ++
+        "  gs-referral-tracker list-referrals [--limit <n>]\n" ++
+        "  gs-referral-tracker summary [--since <YYYY-MM-DD>]\n" ++
+        "  gs-referral-tracker partner-health [--since <YYYY-MM-DD>] [--status <status>] [--limit <n>]\n" ++
+        "  gs-referral-tracker partner-alerts [--stale-days <n>] [--status <status>] [--as-of <YYYY-MM-DD>] [--limit <n>]\n\n" ++
+        "Environment:\n" ++
+        "  DATABASE_URL must be set to the production Postgres connection string.\n" ++
+        "Notes:\n" ++
+        "  Commands shell out to psql, so ensure psql is available.\n"
     );
 }
 
@@ -178,6 +186,64 @@ fn summary(allocator: Allocator, args: []const []const u8) !void {
     try runPsqlCommand(allocator, sql);
 }
 
+fn partnerHealth(allocator: Allocator, args: []const []const u8) !void {
+    var since: ?[]const u8 = null;
+    var status: ?[]const u8 = null;
+    var limit: usize = 25;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--since") and i + 1 < args.len) {
+            i += 1;
+            since = args[i];
+        } else if (std.mem.eql(u8, arg, "--status") and i + 1 < args.len) {
+            i += 1;
+            status = args[i];
+        } else if (std.mem.eql(u8, arg, "--limit") and i + 1 < args.len) {
+            i += 1;
+            limit = try std.fmt.parseInt(usize, args[i], 10);
+        } else {
+            std.debug.print("Unknown or incomplete flag: {s}\n", .{arg});
+            return;
+        }
+    }
+
+    const sql = try buildPartnerHealthSql(allocator, since, status, limit);
+    defer allocator.free(sql);
+    try runPsqlCommand(allocator, sql);
+}
+
+fn partnerAlerts(allocator: Allocator, args: []const []const u8) !void {
+    var status: ?[]const u8 = null;
+    var stale_days: i64 = 30;
+    var limit: usize = 25;
+    var as_of: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--status") and i + 1 < args.len) {
+            i += 1;
+            status = args[i];
+        } else if (std.mem.eql(u8, arg, "--stale-days") and i + 1 < args.len) {
+            i += 1;
+            stale_days = try std.fmt.parseInt(i64, args[i], 10);
+        } else if (std.mem.eql(u8, arg, "--as-of") and i + 1 < args.len) {
+            i += 1;
+            as_of = args[i];
+        } else if (std.mem.eql(u8, arg, "--limit") and i + 1 < args.len) {
+            i += 1;
+            limit = try std.fmt.parseInt(usize, args[i], 10);
+        } else {
+            std.debug.print("Unknown or incomplete flag: {s}\n", .{arg});
+            return;
+        }
+    }
+
+    const sql = try buildPartnerAlertsSql(allocator, status, stale_days, limit, as_of);
+    defer allocator.free(sql);
+    try runPsqlCommand(allocator, sql);
+}
+
 fn buildAddReferralSql(
     allocator: Allocator,
     partner: []const u8,
@@ -220,37 +286,127 @@ fn buildAddReferralSql(
     );
 }
 
+fn buildPartnerHealthSql(
+    allocator: Allocator,
+    since: ?[]const u8,
+    status: ?[]const u8,
+    limit: usize,
+) ![]u8 {
+    var sql = try std.ArrayList(u8).initCapacity(allocator, 0);
+    defer sql.deinit(allocator);
+
+    try sql.appendSlice(
+        allocator,
+        "select p.name, p.status, p.region, p.sector, " ++
+            "count(r.referral_id) as referrals, max(r.referral_date) as last_referral " ++
+            "from gs_referral_tracker.partner p " ++
+            "left join gs_referral_tracker.referral r on r.partner_id = p.partner_id",
+    );
+
+    if (since) |since_date| {
+        const since_esc = try escapeSqlLiteral(allocator, since_date);
+        defer allocator.free(since_esc);
+        try sql.appendSlice(allocator, " and r.referral_date >= '");
+        try sql.appendSlice(allocator, since_esc);
+        try sql.appendSlice(allocator, "'");
+    }
+
+    if (status) |status_value| {
+        const status_esc = try escapeSqlLiteral(allocator, status_value);
+        defer allocator.free(status_esc);
+        try sql.appendSlice(allocator, " where p.status = '");
+        try sql.appendSlice(allocator, status_esc);
+        try sql.appendSlice(allocator, "'");
+    }
+
+    try sql.appendSlice(
+        allocator,
+        " group by p.name, p.status, p.region, p.sector " ++
+            "order by last_referral desc nulls last, referrals desc, p.name limit ",
+    );
+    try sql.writer(allocator).print("{d};", .{limit});
+
+    return sql.toOwnedSlice(allocator);
+}
+
+fn buildPartnerAlertsSql(
+    allocator: Allocator,
+    status: ?[]const u8,
+    stale_days: i64,
+    limit: usize,
+    as_of: ?[]const u8,
+) ![]u8 {
+    var sql = try std.ArrayList(u8).initCapacity(allocator, 0);
+    defer sql.deinit(allocator);
+
+    const as_of_expr = if (as_of) |as_of_date| blk: {
+        const as_of_esc = try escapeSqlLiteral(allocator, as_of_date);
+        defer allocator.free(as_of_esc);
+        break :blk try std.fmt.allocPrint(allocator, "'{s}'::date", .{as_of_esc});
+    } else blk: {
+        break :blk try std.fmt.allocPrint(allocator, "current_date", .{});
+    };
+    defer allocator.free(as_of_expr);
+
+    try sql.appendSlice(allocator, "select p.name, p.status, p.region, p.sector, ");
+    try sql.appendSlice(allocator, "max(r.referral_date) as last_referral, ");
+    try sql.appendSlice(allocator, as_of_expr);
+    try sql.appendSlice(allocator, " - max(r.referral_date) as days_since ");
+    try sql.appendSlice(
+        allocator,
+        "from gs_referral_tracker.partner p left join gs_referral_tracker.referral r on r.partner_id = p.partner_id",
+    );
+
+    if (status) |status_value| {
+        const status_esc = try escapeSqlLiteral(allocator, status_value);
+        defer allocator.free(status_esc);
+        try sql.appendSlice(allocator, " where p.status = '");
+        try sql.appendSlice(allocator, status_esc);
+        try sql.appendSlice(allocator, "'");
+    }
+
+    try sql.appendSlice(allocator, " group by p.name, p.status, p.region, p.sector");
+    try sql.appendSlice(allocator, " having (max(r.referral_date) is null or (");
+    try sql.appendSlice(allocator, as_of_expr);
+    try sql.appendSlice(allocator, " - max(r.referral_date)) >= ");
+    try sql.writer(allocator).print("{d})", .{stale_days});
+    try sql.appendSlice(allocator, " order by days_since desc nulls last, p.name limit ");
+    try sql.writer(allocator).print("{d};", .{limit});
+
+    return sql.toOwnedSlice(allocator);
+}
+
 fn escapeSqlLiteral(allocator: Allocator, value: []const u8) ![]u8 {
-    var buffer = std.ArrayList(u8).init(allocator);
-    defer buffer.deinit();
+    var buffer = try std.ArrayList(u8).initCapacity(allocator, 0);
+    defer buffer.deinit(allocator);
 
     for (value) |ch| {
         if (ch == '\'') {
-            try buffer.append('\'');
+            try buffer.append(allocator, '\'');
         }
-        try buffer.append(ch);
+        try buffer.append(allocator, ch);
     }
 
-    return buffer.toOwnedSlice();
+    return buffer.toOwnedSlice(allocator);
 }
 
 fn runPsqlCommand(allocator: Allocator, sql: []const u8) !void {
     const db_url = try getDatabaseUrl(allocator);
     defer allocator.free(db_url);
 
-    var argv = std.ArrayList([]const u8).init(allocator);
-    defer argv.deinit();
+    var argv = try std.ArrayList([]const u8).initCapacity(allocator, 0);
+    defer argv.deinit(allocator);
 
-    try argv.append("psql");
-    try argv.append("-d");
-    try argv.append(db_url);
-    try argv.append("-v");
-    try argv.append("ON_ERROR_STOP=1");
-    try argv.append("-A");
-    try argv.append("-F");
-    try argv.append("\t");
-    try argv.append("-c");
-    try argv.append(sql);
+    try argv.append(allocator, "psql");
+    try argv.append(allocator, "-d");
+    try argv.append(allocator, db_url);
+    try argv.append(allocator, "-v");
+    try argv.append(allocator, "ON_ERROR_STOP=1");
+    try argv.append(allocator, "-A");
+    try argv.append(allocator, "-F");
+    try argv.append(allocator, "\t");
+    try argv.append(allocator, "-c");
+    try argv.append(allocator, sql);
 
     const result = try std.process.Child.run(.{
         .allocator = allocator,
@@ -269,16 +425,16 @@ fn runPsqlFile(allocator: Allocator, path: []const u8) !void {
     const db_url = try getDatabaseUrl(allocator);
     defer allocator.free(db_url);
 
-    var argv = std.ArrayList([]const u8).init(allocator);
-    defer argv.deinit();
+    var argv = try std.ArrayList([]const u8).initCapacity(allocator, 0);
+    defer argv.deinit(allocator);
 
-    try argv.append("psql");
-    try argv.append("-d");
-    try argv.append(db_url);
-    try argv.append("-v");
-    try argv.append("ON_ERROR_STOP=1");
-    try argv.append("-f");
-    try argv.append(path);
+    try argv.append(allocator, "psql");
+    try argv.append(allocator, "-d");
+    try argv.append(allocator, db_url);
+    try argv.append(allocator, "-v");
+    try argv.append(allocator, "ON_ERROR_STOP=1");
+    try argv.append(allocator, "-f");
+    try argv.append(allocator, path);
 
     const result = try std.process.Child.run(.{
         .allocator = allocator,
@@ -314,4 +470,23 @@ test "buildAddReferralSql includes required values" {
     try std.testing.expect(std.mem.containsAtLeast(u8, sql, 1, "Partner A"));
     try std.testing.expect(std.mem.containsAtLeast(u8, sql, 1, "Scholar B"));
     try std.testing.expect(std.mem.containsAtLeast(u8, sql, 1, "2025-01-10"));
+}
+
+test "buildPartnerHealthSql includes filters and limit" {
+    const allocator = std.testing.allocator;
+    const sql = try buildPartnerHealthSql(allocator, "2025-11-01", "active", 10);
+    defer allocator.free(sql);
+    try std.testing.expect(std.mem.containsAtLeast(u8, sql, 1, "referral_date >= '2025-11-01'"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, sql, 1, "where p.status = 'active'"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, sql, 1, "limit 10"));
+}
+
+test "buildPartnerAlertsSql includes as-of, stale filter, and status" {
+    const allocator = std.testing.allocator;
+    const sql = try buildPartnerAlertsSql(allocator, "active", 45, 12, "2026-01-10");
+    defer allocator.free(sql);
+    try std.testing.expect(std.mem.containsAtLeast(u8, sql, 1, "where p.status = 'active'"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, sql, 1, "'2026-01-10'::date - max"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, sql, 1, ">= 45"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, sql, 1, "limit 12"));
 }

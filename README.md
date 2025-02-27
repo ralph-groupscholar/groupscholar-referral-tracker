@@ -7,6 +7,8 @@ A Zig CLI for logging partner referrals into Group Scholar and generating quick 
 - Log referrals with partner metadata and notes.
 - List recent referrals and export tab-delimited output.
 - Generate partner-level referral summaries with optional date filters.
+- Review partner health snapshots with last referral activity.
+- Flag partners with stale or missing referral activity.
 
 ## Tech
 - Zig
@@ -26,6 +28,8 @@ zig build run -- init-db
 zig build run -- add-referral --partner "Northside Scholars Network" --scholar "Tara Singh" --channel "Warm intro" --date "2026-02-01" --sector "Nonprofit" --region "Midwest" --notes "Referred after alumni event."
 zig build run -- list-referrals --limit 10
 zig build run -- summary --since "2025-11-01"
+zig build run -- partner-health --since "2025-11-01" --status "active" --limit 15
+zig build run -- partner-alerts --stale-days 45 --status "active" --as-of "2026-02-01" --limit 10
 ```
 
 ## Tests
