@@ -44,10 +44,10 @@ pub fn main() !void {
 }
 
 fn printHelp() !void {
-    const out = std.io.getStdOut().writer();
+    const out = std.fs.File.stdout().deprecatedWriter();
     try out.writeAll(
         "Group Scholar Referral Tracker\n\n" ++
-        "Usage:\n" ++
+            "Usage:\n" ++
         "  gs-referral-tracker help\n" ++
         "  gs-referral-tracker init-db\n" ++
         "  gs-referral-tracker add-referral --partner <name> --scholar <name> --channel <channel> --date <YYYY-MM-DD> [--sector <sector>] [--region <region>] [--status <status>] [--notes <text>]\n" ++
@@ -413,8 +413,8 @@ fn runPsqlCommand(allocator: Allocator, sql: []const u8) !void {
         .argv = argv.items,
     });
 
-    try std.io.getStdOut().writeAll(result.stdout);
-    try std.io.getStdErr().writeAll(result.stderr);
+    try std.fs.File.stdout().writeAll(result.stdout);
+    try std.fs.File.stderr().writeAll(result.stderr);
 
     if (result.term.Exited != 0) {
         return error.PsqlFailed;
@@ -441,8 +441,8 @@ fn runPsqlFile(allocator: Allocator, path: []const u8) !void {
         .argv = argv.items,
     });
 
-    try std.io.getStdOut().writeAll(result.stdout);
-    try std.io.getStdErr().writeAll(result.stderr);
+    try std.fs.File.stdout().writeAll(result.stdout);
+    try std.fs.File.stderr().writeAll(result.stderr);
 
     if (result.term.Exited != 0) {
         return error.PsqlFailed;
